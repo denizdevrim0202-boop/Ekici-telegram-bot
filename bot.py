@@ -35,11 +35,11 @@ logger = logging.getLogger(__name__)
 # CONFIG
 # ─────────────────────────────────────────────
 
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "8412174563:AAFOlWXJLnLTDkrNUXALIKJc46DIAk_iEwI")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1497161616")
 
-MIN_VOLUME_USDT       = 5_000_000
-MIN_SCORE             = 7
+MIN_VOLUME_USDT       = 3_000_000
+MIN_SCORE             = 6
 MAX_ACTIVE_SIGNALS    = 5
 MIN_RR                = 3.0
 SIGNAL_EXPIRY_HOURS   = 36
@@ -55,13 +55,13 @@ FUNDING_SHORT_MIN     = -0.001
 QUIET_HOURS_START     = 0
 QUIET_HOURS_END       = 6
 VOLUME_SPIKE_MULTIPLIER = 1.5
-SPREAD_MAX_PCT        = 0.005
+SPREAD_MAX_PCT        = 0.04
 
 DATA_DIR  = os.environ.get("DATA_DIR", "./data")
 DATA_FILE = os.path.join(DATA_DIR, "signals.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-SMC_MIN_SCORE      = 7
+SMC_MIN_SCORE      = 6
 SMC_MAX_SCORE      = 12
 SMT_BONUS_CAP      = 13
 SWING_LOOKBACK     = 5
@@ -196,6 +196,8 @@ def detect_choch(df: pd.DataFrame, lookback: int = SWING_LOOKBACK) -> dict:
         return result
     last_lh_idx, last_lh = min(highs[-4:], key=lambda x: x[1]) if len(highs) >= 4 else highs[-1]
     last_hl_idx, last_hl = max(lows[-4:],  key=lambda x: x[1]) if len(lows)  >= 4 else lows[-1]
+    last_hh_idx, last_hh = max(highs[-4:], key=lambda x: x[1]) if len(highs) >= 4 else highs[-1]
+    last_ll_idx, last_ll = min(lows[-4:],  key=lambda x: x[1]) if len(lows)  >= 4 else lows[-1]
     curr = df["close"].iloc[-1]
     if curr > last_lh:
         result = {"detected": True, "direction": "long",  "level": last_lh, "index": last_lh_idx}
@@ -238,12 +240,14 @@ def detect_order_blocks(df: pd.DataFrame, vol_multiplier: float = OB_VOLUME_MULT
         if c["close"] < c["open"] and nxt["close"] > nxt["open"]:
             ob_high = max(c["open"], c["close"])
             ob_low  = min(c["open"], c["close"])
-            if curr >= ob_low:
+            mitigated = curr < ob_low
+            if not mitigated:
                 obs.append({"type": "demand", "high": ob_high, "low": ob_low, "index": i, "mitigated": False})
         elif c["close"] > c["open"] and nxt["close"] < nxt["open"]:
             ob_high = max(c["open"], c["close"])
             ob_low  = min(c["open"], c["close"])
-            if curr <= ob_high:
+            mitigated = curr > ob_high
+            if not mitigated:
                 obs.append({"type": "supply", "high": ob_high, "low": ob_low, "index": i, "mitigated": False})
     return obs
 
@@ -455,9 +459,11 @@ def get_klines(symbol, interval, limit=200) -> pd.DataFrame:
         ex    = ccxt.mexc()
         clean = symbol.replace("_USDT","").replace("USDT","")
         raw   = ex.fetch_ohlcv(f"{clean}/USDT", interval, limit=limit)
-        return pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"])
+        if raw:
+            return pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"])
+        raise ValueError(f"ccxt returned empty data for {symbol}")
     except Exception as e:
-        logger.error(f"ccxt fallback failed for {symbol}: {e}")
+        logger.warning(f"ccxt fallback failed for {symbol}: {e}")
         raise
 
 
@@ -558,6 +564,7 @@ def get_btc_change_pct() -> float:
         return 0.0
 
 
+
 def get_volume_spike(symbol, multiplier=VOLUME_SPIKE_MULTIPLIER) -> bool:
     try:
         df = get_klines(symbol, "1h", limit=25)
@@ -604,7 +611,7 @@ def filter_daily_bias(symbol, direction):
         return True, "Daily bias check skipped"
 
 
-def filter_btc_correlation(direction):
+def filter_btc_correlation(direction, symbol=None):
     try:
         chg = get_btc_change_pct()
         if chg <= -BTC_MOVE_LIMIT_PCT and direction == "long":
@@ -614,7 +621,6 @@ def filter_btc_correlation(direction):
         return True, f"BTC change {chg:.2f}% OK"
     except Exception:
         return True, "BTC correlation skipped"
-
 
 def filter_funding_rate(symbol, direction):
     try:
@@ -753,7 +759,7 @@ def score_smc(df: pd.DataFrame) -> dict:
 
     # 2H Bias
     try:
-        sym = df.attrs.get("symbol", "")
+        sym = df_score.attrs.get("symbol", "") or df.attrs.get("symbol", "")
         bias_2h = get_trend_direction(get_klines(sym, "2h", limit=50)) if sym else "neutral"
     except Exception:
         bias_2h = "neutral"
@@ -864,9 +870,12 @@ def find_entry_sl_tp(df, direction, smc_result) -> dict:
         near = [l[1] for l in lows if l[1] < curr]
         if near: sl_cands.append(max(near) * (1 - SL_BUFFER_PCT))
         sl_min = curr * (1 - 0.03)
-        sl = min(min(sl_cands), sl_min) if sl_cands else sl_min
+        sl = min(sl_cands) if sl_cands else sl_min
+        sl = min(sl, sl_min)
 
-        risk = max(entry - sl, curr * 0.03)
+        risk = entry - sl
+        if risk <= 0:
+            risk = curr * 0.03
         tp   = _find_tp_long(entry, sl, smc_result, highs)
 
     else:
@@ -886,9 +895,12 @@ def find_entry_sl_tp(df, direction, smc_result) -> dict:
         near = [h[1] for h in highs if h[1] > curr]
         if near: sl_cands.append(min(near) * (1 + SL_BUFFER_PCT))
         sl_max = curr * (1 + 0.03)
-        sl = max(max(sl_cands), sl_max) if sl_cands else sl_max
+        sl = max(sl_cands) if sl_cands else sl_max
+        sl = max(sl, sl_max)
 
-        risk = max(sl - entry, curr * 0.03)
+        risk = sl - entry
+        if risk <= 0:
+            risk = curr * 0.03
         tp   = _find_tp_short(entry, sl, smc_result, lows)
 
     rr = abs(tp - entry) / abs(sl - entry) if abs(sl - entry) > 0 else 0
@@ -1076,9 +1088,13 @@ EQ_COLOR          = "#757575"
 
 
 def _fp(price):
-    if price >= 1000: return f"{price:,.1f}"
+    """Format price for chart labels."""
+    if price >= 1000: return f"{price:,.2f}"
     if price >= 1:    return f"{price:.4f}"
     return f"{price:.6f}"
+
+# Same function used in telegram messages
+_fmt_price = _fp
 
 
 def _draw_candle(ax, idx, o, h, l, c, w=0.6):
@@ -1128,6 +1144,23 @@ def generate_chart(df, symbol, timeframe, direction, entry, sl, tp, rr, smc_resu
         ax.axhline(y=lvl, color=EQ_COLOR, linewidth=0.8, linestyle=":", alpha=0.6)
     for lvl in smc_result.get("eql", []):
         ax.axhline(y=lvl, color=EQ_COLOR, linewidth=0.8, linestyle=":", alpha=0.6)
+
+    # Draw all demand zones (green) and supply zones (red) with low opacity
+    for ob in smc_result.get("obs_demand", []):
+        ob_idx = ob.get("index", 0)
+        ax.add_patch(patches.Rectangle(
+            (max(0, ob_idx), ob["low"]),
+            n + extra - 2 - max(0, ob_idx), ob["high"] - ob["low"],
+            linewidth=0.5, edgecolor=OB_DEMAND_COLOR, facecolor=OB_DEMAND_COLOR,
+            alpha=0.06, zorder=1))
+
+    for ob in smc_result.get("obs_supply", []):
+        ob_idx = ob.get("index", 0)
+        ax.add_patch(patches.Rectangle(
+            (max(0, ob_idx), ob["low"]),
+            n + extra - 2 - max(0, ob_idx), ob["high"] - ob["low"],
+            linewidth=0.5, edgecolor=OB_SUPPLY_COLOR, facecolor=OB_SUPPLY_COLOR,
+            alpha=0.06, zorder=1))
 
     if direction == "long":
         obs  = [o for o in smc_result.get("obs_demand",[]) if o["low"] <= entry <= o["high"] * 1.02]
@@ -1232,10 +1265,6 @@ def send_photo(image_bytes, caption="", chat_id=None) -> bool:
         return False
 
 
-def _fmt_price(p):
-    if p >= 1000: return f"{p:,.2f}"
-    if p >= 1:    return f"{p:.4f}"
-    return f"{p:.6f}"
 
 
 def format_signal_message(symbol, direction, timeframe, entry, sl, tp, rr, score, max_score=12, leverage=10) -> str:
@@ -1292,10 +1321,20 @@ def _get_updates(offset=0) -> list:
     try:
         r = requests.get(f"{BASE_URL}/getUpdates",
                          params={"timeout": 30, "offset": offset}, timeout=35)
+        if r.status_code == 409:
+            logger.warning("getUpdates 409: conflict, deleting webhook and waiting...")
+            try:
+                requests.get(f"{BASE_URL}/deleteWebhook",
+                             params={"drop_pending_updates": True}, timeout=10)
+            except Exception:
+                pass
+            time.sleep(5)
+            return []
         r.raise_for_status()
         return r.json().get("result", [])
     except Exception as e:
         logger.error(f"getUpdates failed: {e}")
+        time.sleep(3)
         return []
 
 
@@ -1310,8 +1349,7 @@ def _cmd_start(chat_id):
         "/scan 1h|2h — Run manual scan\n"
         "/test — Send test message\n"
         "/topsetups — Top 5 setups\n"
-        "/history — Last 10 closed signals\n"
-        "/ping — Bot health check",
+        "/history — Last 10 closed signals",
         chat_id=chat_id)
 
 
@@ -1434,15 +1472,15 @@ def _cmd_analyze(chat_id, args):
         halfway = (e + tp_) / 2 if d == "long" else (e + tp_) / 2
 
         if d == "long":
-            if curr > e * 1.02:      status = "❌ Entry passed, do not enter"
-            elif curr >= tp_ * 0.99: status = "❌ Near TP, do not enter"
-            elif curr >= halfway:    status = "⚠️ Going to TP — late entry"
-            else:                    status = "✅ Still valid — inside entry zone"
+            if curr > e * (1 + NEAR_ZONE_PCT):  status = "❌ Entry passed, do not enter"
+            elif curr >= tp_ * 0.99:             status = "❌ Near TP, do not enter"
+            elif curr >= halfway:                status = "⚠️ Going to TP — late entry"
+            else:                                status = "✅ Still valid — inside entry zone"
         else:
-            if curr < e * 0.98:      status = "❌ Entry passed, do not enter"
-            elif curr <= tp_ * 1.01: status = "❌ Near TP, do not enter"
-            elif curr <= halfway:    status = "⚠️ Going to TP — late entry"
-            else:                    status = "✅ Still valid — inside entry zone"
+            if curr < e * (1 - NEAR_ZONE_PCT):  status = "❌ Entry passed, do not enter"
+            elif curr <= tp_ * 1.01:             status = "❌ Near TP, do not enter"
+            elif curr <= halfway:                status = "⚠️ Going to TP — late entry"
+            else:                                status = "✅ Still valid — inside entry zone"
 
         passing_criteria = [k for k, v in smc["criteria"].items() if v == d]
         lev = calc_leverage(lvls["risk_pct"])
