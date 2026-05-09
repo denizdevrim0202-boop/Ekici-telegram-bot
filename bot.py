@@ -39,7 +39,7 @@ TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "8412174563:AAFOlWXJLnLTDk
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1497161616")
 
 MIN_VOLUME_USDT       = 3_000_000
-MIN_SCORE             = 6
+MIN_SCORE             = 7
 MAX_ACTIVE_SIGNALS    = 5
 MIN_RR                = 3.0
 SIGNAL_EXPIRY_HOURS   = 36
@@ -55,7 +55,7 @@ FUNDING_SHORT_MIN     = -0.001
 QUIET_HOURS_START     = 0
 QUIET_HOURS_END       = 6
 VOLUME_SPIKE_MULTIPLIER = 1.5
-SPREAD_MAX_PCT        = 0.04
+SPREAD_MAX_PCT        = 0.005
 
 DATA_DIR  = os.environ.get("DATA_DIR", "./data")
 DATA_FILE = os.path.join(DATA_DIR, "signals.json")
@@ -1632,22 +1632,25 @@ def run_scan(timeframe="1h"):
             logger.warning(f"Chart failed {symbol}: {e}")
             chart_bytes = None
 
+        # Taze fiyatla spread kontrolü — add_signal öncesi, coin cooldown'a girmesin
+        fresh_price = get_current_price(symbol)
+        if fresh_price > 0:
+            spread = abs(fresh_price - result["entry"]) / result["entry"]
+            if spread > SPREAD_MAX_PCT:
+                logger.info(f"{symbol}: stale signal, fresh spread {spread:.4f} > {SPREAD_MAX_PCT}, skipping")
+                continue
+
         signal_data = {"symbol": symbol, "direction": result["direction"], "timeframe": timeframe,
                        "entry": result["entry"], "sl": result["sl"], "tp": result["tp"],
                        "rr": result["rr"], "score": result["score"], "leverage": leverage}
 
         if add_signal(signal_data):
-            fresh_price = get_current_price(symbol)
-            if fresh_price > 0:
-                spread = abs(fresh_price - result["entry"]) / result["entry"]
-                if spread > SPREAD_MAX_PCT:
-                    logger.info(f"{symbol}: stale signal, fresh spread {spread:.4f} > {SPREAD_MAX_PCT}, skipping")
-                    continue
             send_signal(symbol=symbol, direction=result["direction"], timeframe=timeframe,
                         entry=result["entry"], sl=result["sl"], tp=result["tp"],
                         rr=result["rr"], score=result["score"], leverage=leverage,
                         chart_bytes=chart_bytes)
             logger.info(f"Signal: {symbol} {result['direction'].upper()} RR:{result['rr']:.2f}")
+
 
     save_scan_results(scan_results)
     logger.info(f"{timeframe} scan done. {len(universe)} symbols checked.")
