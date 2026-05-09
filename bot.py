@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # CONFIG
 # ─────────────────────────────────────────────
 
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN",   "8412174563:AAFOlWXJLnLTDkrNUXALIKJc46DIAk_iEwI")
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1497161616")
 
 MIN_VOLUME_USDT       = 5_000_000
