@@ -1731,7 +1731,7 @@ def _safe(fn):
 
 
 def setup_scheduler():
-    schedule.every(30).minutes.do(_safe(lambda: run_scan("1h")))
+    schedule.every(15).minutes.do(_safe(lambda: run_scan("1h")))
     schedule.every(60).minutes.do(_safe(lambda: run_scan("2h")))
     schedule.every(5).minutes.do(_safe(run_volume_spike_check))
     schedule.every(1).minutes.do(_safe(run_exit_monitor))
