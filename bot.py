@@ -635,10 +635,8 @@ def filter_funding_rate(symbol, direction):
 
 
 def filter_quiet_hours():
-    hour = datetime.now(timezone.utc).hour
-    if QUIET_HOURS_START <= hour < QUIET_HOURS_END:
-        return False, f"Quiet hours ({hour:02d}:xx UTC)"
-    return True, f"Active hours ({hour:02d}:xx UTC)"
+    # Quiet hours filter disabled
+    return True, "Quiet hours filter disabled"
 
 
 def filter_spread(entry, current_price):
@@ -1639,6 +1637,12 @@ def run_scan(timeframe="1h"):
                        "rr": result["rr"], "score": result["score"], "leverage": leverage}
 
         if add_signal(signal_data):
+            fresh_price = get_current_price(symbol)
+            if fresh_price > 0:
+                spread = abs(fresh_price - result["entry"]) / result["entry"]
+                if spread > SPREAD_MAX_PCT:
+                    logger.info(f"{symbol}: stale signal, fresh spread {spread:.4f} > {SPREAD_MAX_PCT}, skipping")
+                    continue
             send_signal(symbol=symbol, direction=result["direction"], timeframe=timeframe,
                         entry=result["entry"], sl=result["sl"], tp=result["tp"],
                         rr=result["rr"], score=result["score"], leverage=leverage,
@@ -1693,6 +1697,12 @@ def run_volume_spike_check():
                            "entry": result["entry"], "sl": result["sl"], "tp": result["tp"],
                            "rr": result["rr"], "score": result["score"], "leverage": leverage}
             if add_signal(signal_data):
+                fresh_price = get_current_price(symbol)
+                if fresh_price > 0:
+                    spread = abs(fresh_price - result["entry"]) / result["entry"]
+                    if spread > SPREAD_MAX_PCT:
+                        logger.info(f"{symbol}: stale signal, fresh spread {spread:.4f} > {SPREAD_MAX_PCT}, skipping")
+                        continue
                 try:
                     chart_bytes = generate_chart(
                         result["df"], base, "1h", result["direction"],
